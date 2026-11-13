@@ -111,7 +111,7 @@ mcts-reasoning-engine/
 ## Running It Locally
 
 ```bash
-git clone [https://github.com/ajvisuni/mcts-reasoning-engine.git](https://github.com/ajvisuni/mcts-reasoning-engine.git)
+git clone https://github.com/ajvisuni/mcts-reasoning-engine.git
 cd mcts-reasoning-engine
 python -m venv .venv
 source .venv/bin/activate
