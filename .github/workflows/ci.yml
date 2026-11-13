@@ -26,4 +26,4 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run unit and invariant tests
-        run: pytest -v
+        run: python -m pytest -v
