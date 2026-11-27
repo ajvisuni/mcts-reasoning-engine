@@ -1,6 +1,19 @@
 import math
 from typing import Dict, List, Optional, Protocol, Tuple
 
+_MERMAID_TRANS = str.maketrans({
+    "&": "&amp;",
+    "\\": "\\\\",
+    '"': "'",
+    "<": "&lt;",
+    ">": "&gt;",
+    "{": "(",
+    "}": ")",
+    ";": ",",
+    "\r": " ",
+    "\n": " ",
+})
+
 
 class ModelInterface(Protocol):
     def expand_candidates(self, state: str, k: int = 4) -> List[Tuple[str, str, float, bool]]:
@@ -59,7 +72,7 @@ class MCTSEngine:
 
     def select(self, root: MCTSNode) -> MCTSNode:
         node = root
-        while node.is_expanded and len(node.children) > 0 and not node.is_terminal:
+        while node.is_expanded and node.children and not node.is_terminal:
             node = max(node.children.values(), key=lambda c: c.puct_score(self.c_puct))
         return node
 
@@ -74,12 +87,13 @@ class MCTSEngine:
             node.is_terminal = True
             return node, 0.0
 
-        child_states = [c[1] for c in candidates]
-        prm_scores = self.model.evaluate_prm(child_states)
+        prm_scores = self.model.evaluate_prm([c[1] for c in candidates])
 
+        solved_child: Optional[MCTSNode] = None
         for (action_s, next_s, prior_p, is_solved), prm_v in zip(candidates, prm_scores):
+            if action_s in node.children:
+                continue
             is_term = is_solved or next_s.strip().endswith("<EOS>")
-            val = 1.0 if is_solved else (0.0 if is_term else float(prm_v))
             child = MCTSNode(
                 state=next_s,
                 parent=node,
@@ -88,10 +102,17 @@ class MCTSEngine:
                 is_terminal=is_term,
                 is_solved=is_solved,
             )
-            child.prm_value = val
+            child.prm_value = 1.0 if is_solved else (0.0 if is_term else float(prm_v))
             node.children[action_s] = child
-            if is_solved:
-                return child, 1.0
+            if is_solved and solved_child is None:
+                solved_child = child
+
+        if not node.children:
+            node.is_terminal = True
+            return node, 0.0
+
+        if solved_child is not None:
+            return solved_child, 1.0
 
         best_child = max(node.children.values(), key=lambda c: c.prm_value + 0.2 * c.prior)
         return best_child, best_child.prm_value
@@ -107,7 +128,6 @@ class MCTSEngine:
         self, root_state: str, max_simulations: int = 16
     ) -> Tuple[bool, List[str], MCTSNode]:
         root = MCTSNode(state=root_state, prior=1.0)
-        root.visit_count = 1
 
         for _ in range(max_simulations):
             leaf = self.select(root)
@@ -115,20 +135,15 @@ class MCTSEngine:
             self.backpropagate(child, val)
             if child.is_solved:
                 return True, child.extract_action_trace(), root
-
-            curr = child
-            for _ in range(2):
-                if curr.is_terminal or curr.is_solved:
-                    break
-                nxt_child, nxt_val = self.expand_and_evaluate(curr)
-                self.backpropagate(nxt_child, nxt_val)
-                if nxt_child.is_solved:
-                    return True, nxt_child.extract_action_trace(), root
-                curr = nxt_child
+            if root.is_terminal:
+                break
 
         curr = root
         while curr.children:
-            curr = max(curr.children.values(), key=lambda c: (c.visit_count, c.q_value))
+            curr = max(
+                curr.children.values(),
+                key=lambda c: (c.visit_count, c.q_value, c.prm_value),
+            )
         return curr.is_solved, curr.extract_action_trace(), root
 
     @staticmethod
@@ -166,7 +181,7 @@ class MCTSEngine:
             node_ids[id(n)] = nid
             label = n.action if n.action else n.state
             status = "SOLVED" if n.is_solved else f"Q={n.q_value:.2f}, N={n.visit_count}"
-            clean = label.replace('"', "'").replace("<", "&lt;").replace(">", "&gt;")
+            clean = label.translate(_MERMAID_TRANS)
             lines.append(f'    {nid}["{clean}<br/>({status})"]')
             for child in n.children.values():
                 visit(child)

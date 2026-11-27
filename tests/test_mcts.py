@@ -1,5 +1,7 @@
 import math
 from src.mcts import MCTSNode, MCTSEngine
+from src.baselines import run_greedy, run_best_of_n_prm
+from src.env import format_root_state, parse_latest_state, generate_random_valid_moves, verify_and_apply_step
 
 
 class MockModelInterface:
@@ -23,6 +25,24 @@ class MockModelInterface:
             "GOAL <EOS>": 1.00,
         }
         return [scores.get(s, 0.5) for s in states]
+
+
+class UniformCountdownInterface:
+    def expand_candidates(self, state: str, k: int = 4):
+        target, nums, is_term = parse_latest_state(state)
+        if is_term or len(nums) <= 1:
+            return []
+        moves = generate_random_valid_moves(nums, target)[:k]
+        out = []
+        prior = 1.0 / max(1, len(moves))
+        for step_s, _ in moves:
+            ok, nxt_s, _, solved = verify_and_apply_step(state, step_s)
+            if ok:
+                out.append((step_s, nxt_s, prior, solved))
+        return out
+
+    def evaluate_prm(self, states: list[str]) -> list[float]:
+        return [0.5 for _ in states]
 
 
 def test_puct_formula_exactness():
@@ -58,3 +78,55 @@ def test_mcts_escapes_high_prior_trap():
     assert solved is True
     assert trace == ["STEP_B_GOOD", "SOLVE"]
     assert root.children["STEP_B_GOOD"].visit_count >= root.children["STEP_A_TRAP"].visit_count
+
+
+def test_mcts_handles_empty_and_duplicate_candidates():
+    class EmptyInterface:
+        def expand_candidates(self, state: str, k: int = 4):
+            return []
+
+        def evaluate_prm(self, states: list[str]) -> list[float]:
+            return []
+
+    solved, trace, root = MCTSEngine(model=EmptyInterface()).search("ROOT", max_simulations=4)
+    assert solved is False
+    assert trace == []
+    assert root.is_terminal is True
+
+    class DupInterface:
+        def expand_candidates(self, state: str, k: int = 4):
+            return [
+                ("SAME", "S1 <EOS>", 0.5, True),
+                ("SAME", "S2 <EOS>", 0.5, False),
+            ]
+
+        def evaluate_prm(self, states: list[str]) -> list[float]:
+            return [1.0, 0.0]
+
+    solved2, trace2, root2 = MCTSEngine(model=DupInterface()).search("ROOT", max_simulations=2)
+    assert solved2 is True
+    assert trace2 == ["SAME"]
+    assert len(root2.children) == 1
+
+
+def test_mcts_on_real_countdown_env_and_mermaid_escaping():
+    root_s = format_root_state([12, 2], 24)
+    engine = MCTSEngine(model=UniformCountdownInterface(), branch_factor=4)
+    solved, trace, root = engine.search(root_s, max_simulations=6)
+    assert solved is True
+    assert len(trace) == 1
+
+    mermaid = MCTSEngine.to_mermaid(root)
+    assert "graph TD" in mermaid
+    assert "&lt;EOS&gt;" in mermaid
+
+
+def test_baselines_greedy_and_best_of_n():
+    mock = MockModelInterface()
+    g_ok, g_trace = run_greedy(mock, "ROOT")
+    assert g_ok is False
+    assert g_trace[0] == "STEP_A_TRAP"
+
+    bon_ok, bon_trace = run_best_of_n_prm(mock, "ROOT", n_trajectories=8, seed=42)
+    assert bon_ok is True
+    assert bon_trace == ["STEP_B_GOOD", "SOLVE"]

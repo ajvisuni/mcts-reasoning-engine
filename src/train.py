@@ -1,5 +1,5 @@
 import argparse
-import os
+from pathlib import Path
 import random
 from typing import List, Tuple
 import torch
@@ -53,14 +53,18 @@ def train_model(
     epochs: int = 10,
     batch_size: int = 128,
     lr: float = 4e-4,
+    seed: int = 42,
     save_path: str = "data/checkpoint.pt",
 ):
+    random.seed(seed)
+    torch.manual_seed(seed)
+
     device = get_device()
     print(f"Using device: {device}")
 
     tokenizer = CountdownTokenizer()
-    raw_data = generate_dataset(num_problems=num_problems, seed=42)
-    random.Random(42).shuffle(raw_data)
+    raw_data = generate_dataset(num_problems=num_problems, seed=seed)
+    random.Random(seed).shuffle(raw_data)
 
     split = int(0.9 * len(raw_data))
     train_ds = CountdownReasoningDataset(raw_data[:split], tokenizer)
@@ -75,6 +79,8 @@ def train_model(
         n_heads=4,
         max_len=128,
     ).to(device)
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"Model parameters: {n_params:,}")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-2)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
@@ -100,7 +106,8 @@ def train_model(
                 ignore_index=tokenizer.pad_id,
                 reduction="none",
             ).view(seq.size(0), -1)
-            seq_lm_loss = token_loss.mean(dim=-1)
+            non_pad = (shift_targets != tokenizer.pad_id).float()
+            seq_lm_loss = (token_loss * non_pad).sum(dim=-1) / non_pad.sum(dim=-1).clamp_min(1.0)
             lm_loss = (seq_lm_loss * is_policy).sum() / (is_policy.sum() + 1e-6)
 
             b_idx = torch.arange(seq.size(0), device=device)
@@ -136,15 +143,18 @@ def train_model(
             f"Val PRM Acc: {acc:.2f}%"
         )
 
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    out_path = Path(save_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
             "model_state_dict": model.state_dict(),
             "test_problems": raw_data[split:][:200],
+            "seed": seed,
+            "num_problems": num_problems,
         },
-        save_path,
+        out_path,
     )
-    print(f"Saved checkpoint to {save_path}")
+    print(f"Saved checkpoint to {out_path}")
 
 
 if __name__ == "__main__":
@@ -152,5 +162,15 @@ if __name__ == "__main__":
     parser.add_argument("--problems", type=int, default=4000)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--lr", type=float, default=4e-4)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--save-path", type=str, default="data/checkpoint.pt")
     args = parser.parse_args()
-    train_model(num_problems=args.problems, epochs=args.epochs, batch_size=args.batch_size)
+    train_model(
+        num_problems=args.problems,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        seed=args.seed,
+        save_path=args.save_path,
+    )

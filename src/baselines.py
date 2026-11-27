@@ -21,20 +21,25 @@ def run_greedy(model: ModelInterface, root_state: str, max_steps: int = 3) -> Tu
 
 
 def run_best_of_n_prm(
-    model: ModelInterface, root_state: str, n_trajectories: int = 4, max_steps: int = 3
+    model: ModelInterface,
+    root_state: str,
+    n_trajectories: int = 4,
+    max_steps: int = 3,
+    seed: int = 42,
 ) -> Tuple[bool, List[str]]:
     best_trace: List[str] = []
     best_score = -1.0
-    rng = random.Random(42)
+    rng = random.Random(seed)
+    n_runs = max(1, n_trajectories)
 
-    for idx in range(max(1, n_trajectories)):
+    for idx in range(n_runs):
         curr = root_state
         trace = []
         visited = []
         solved = False
 
         for _ in range(max_steps):
-            cands = model.expand_candidates(curr, k=4)
+            cands = model.expand_candidates(curr, k=1 if idx == 0 else 4)
             if not cands:
                 break
             if idx == 0:
@@ -56,9 +61,11 @@ def run_best_of_n_prm(
         if solved:
             return True, trace
 
+        if n_runs == 1:
+            return False, trace
+
         if visited:
-            scores = model.evaluate_prm(visited)
-            traj_score = min(scores)
+            traj_score = min(model.evaluate_prm(visited))
             if traj_score > best_score:
                 best_score = traj_score
                 best_trace = trace

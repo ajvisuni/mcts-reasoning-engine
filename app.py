@@ -1,4 +1,5 @@
 from pathlib import Path
+import threading
 import gradio as gr
 import torch
 
@@ -7,18 +8,24 @@ from src.tokenizer import CountdownTokenizer
 from src.model import DualHeadReasoningTransformer, TorchPolicyPRMInterface
 from src.mcts import MCTSEngine
 from src.baselines import run_greedy
-from src.train import get_device, train_model
+from src.train import get_device
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-CHECKPOINT_PATH = str(PROJECT_ROOT / "data" / "checkpoint.pt")
+CHECKPOINT_PATH = PROJECT_ROOT / "data" / "checkpoint.pt"
+
+_INTERFACE = None
+_LOCK = threading.Lock()
 
 
-def load_or_init_interface() -> TorchPolicyPRMInterface:
+def load_interface() -> TorchPolicyPRMInterface:
+    if not CHECKPOINT_PATH.exists():
+        raise FileNotFoundError(
+            f"Missing checkpoint at {CHECKPOINT_PATH}. "
+            "Download checkpoint.pt from the release or run `python -m src.train`."
+        )
+
     device = get_device()
     tokenizer = CountdownTokenizer()
-    if not Path(CHECKPOINT_PATH).exists():
-        train_model(num_problems=2500, epochs=8, batch_size=128, save_path=CHECKPOINT_PATH)
-
     ckpt = torch.load(CHECKPOINT_PATH, map_location=device, weights_only=False)
     model = DualHeadReasoningTransformer(
         vocab_size=tokenizer.vocab_size, d_model=192, n_layers=4, n_heads=4, max_len=128
@@ -28,46 +35,64 @@ def load_or_init_interface() -> TorchPolicyPRMInterface:
     return TorchPolicyPRMInterface(model, tokenizer, device, temperature=0.85)
 
 
-INTERFACE = None
+def get_interface() -> TorchPolicyPRMInterface:
+    global _INTERFACE
+    if _INTERFACE is None:
+        with _LOCK:
+            if _INTERFACE is None:
+                _INTERFACE = load_interface()
+    return _INTERFACE
 
 
 def solve_interactive(nums_str: str, target_val: int, simulations: int, c_puct: float, branch_factor: int):
-    global INTERFACE
-    if INTERFACE is None:
-        INTERFACE = load_or_init_interface()
-
     try:
         nums = [int(x.strip()) for x in nums_str.split(",") if x.strip()]
-        if len(nums) != 4:
-            return "Enter 4 comma-separated integers.", "", "", ""
+        if len(nums) != 4 or any(n <= 0 or n > 999 for n in nums):
+            return "Enter 4 positive integers between 1 and 999.", "", "", ""
         target = int(target_val)
+        if target <= 0 or target > 9999:
+            return "Target must be an integer between 1 and 9999.", "", "", ""
+
+        sims = max(1, min(64, int(simulations)))
+        cpuct = max(0.1, min(5.0, float(c_puct)))
+        bf = max(1, min(8, int(branch_factor)))
     except Exception as e:
         return f"Invalid input: {e}", "", "", ""
 
-    root_s = format_root_state(nums, target)
-    oracle = solve_countdown(nums, target)
-    oracle_s = " -> ".join(oracle) if oracle is not None else "No exact path exists"
+    try:
+        interface = get_interface()
+    except Exception as e:
+        return str(e), "", "", ""
 
-    g_ok, g_trace = run_greedy(INTERFACE, root_s)
-    g_out = (
-        f"{'SOLVED' if g_ok else 'FAILED'}\n"
-        f"Root: {root_s}\n"
-        f"Steps: {' -> '.join(g_trace) if g_trace else '(None)'}\n\n"
-        f"Oracle:\n{oracle_s}"
-    )
+    try:
+        root_s = format_root_state(nums, target)
+        oracle = solve_countdown(nums, target)
+        oracle_s = " -> ".join(oracle) if oracle is not None else "No exact path exists"
 
-    engine = MCTSEngine(model=INTERFACE, c_puct=float(c_puct), branch_factor=int(branch_factor))
-    m_ok, m_trace, root_node = engine.search(root_state=root_s, max_simulations=int(simulations))
+        g_ok, g_trace = run_greedy(interface, root_s)
+        g_steps = "\n".join(g_trace) if g_trace else "(None)"
+        g_out = (
+            f"{'SOLVED' if g_ok else 'FAILED'}\n"
+            f"Root: {root_s}\n"
+            f"Steps:\n{g_steps}\n\n"
+            f"Oracle:\n{oracle_s}"
+        )
 
-    m_out = (
-        f"{'SOLVED' if m_ok else 'UNSOLVED'}\n"
-        f"Simulations: {simulations} | c_puct: {c_puct} | Branch Factor: {branch_factor}\n"
-        f"Trajectory: {' -> '.join(m_trace) if m_trace else '(None)'}"
-    )
+        engine = MCTSEngine(model=interface, c_puct=cpuct, branch_factor=bf)
+        m_ok, m_trace, root_node = engine.search(root_state=root_s, max_simulations=sims)
+        m_steps = "\n".join(m_trace) if m_trace else "(None)"
 
-    ascii_tree = MCTSEngine.to_ascii_tree(root_node)
-    mermaid_code = f"```mermaid\n{MCTSEngine.to_mermaid(root_node)}\n```"
-    return g_out, m_out, ascii_tree, mermaid_code
+        m_out = (
+            f"{'SOLVED' if m_ok else 'UNSOLVED'}\n"
+            f"Simulations: {sims} | c_puct: {cpuct} | Branch Factor: {bf}\n"
+            f"Trajectory:\n{m_steps}"
+        )
+
+        ascii_tree = MCTSEngine.to_ascii_tree(root_node)
+        mermaid_code = f"```mermaid\n{MCTSEngine.to_mermaid(root_node)}\n```"
+        return g_out, m_out, ascii_tree, mermaid_code
+    except Exception as e:
+        return f"Search error: {e}", "", "", ""
 
 
 with gr.Blocks(title="MCTS Reasoning Engine") as demo:
